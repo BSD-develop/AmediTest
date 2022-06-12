@@ -537,8 +537,10 @@ bool Client::initEpoch()
 
 void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w)
 {
+
 	hash32_t he = *reinterpret_cast<hash32_t const*>(header);
 	set_header(he);
+
 	if (m_current_target != target)
 	{
 		set_target(target);
