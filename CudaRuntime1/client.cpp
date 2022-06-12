@@ -218,7 +218,8 @@ void Client::startConversation()
 			serverRes.erase(0, offset + 1);
 			offset = serverRes.find("\n");
 		}
-
+	
+	onWorkRecieved(m_current);
 	workLoop();
 
 	// send solution to server
@@ -400,7 +401,7 @@ void Client::pause(MinerPauseEnum what)
 {
 	boost::mutex::scoped_lock l(x_pause);
 	m_pauseFlags.set(what);
-	m_work.header = dev::h256();
+	m_current.header = dev::h256();
 	kick_miner();
 }
 
@@ -536,7 +537,8 @@ bool Client::initEpoch()
 
 void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w)
 {
-	set_header(*reinterpret_cast<hash32_t const*>(header));
+	hash32_t he = *reinterpret_cast<hash32_t const*>(header);
+	set_header(he);
 	if (m_current_target != target)
 	{
 		set_target(target);
@@ -702,13 +704,14 @@ void Client::workLoop()
 			goto con;
 		}
 
-		if (old_epoch != w.epoch)
-		{
-			if (!initEpoch())
-				goto con;  // This will simply exit the thread
-			old_epoch = w.epoch;
-			goto con;
-		}
+		bool f = initEpoch();
+		if (!f)
+			goto con;  // This will simply exit the thread
+		old_epoch = w.epoch;
+		
+
+		//setWork(w);
+
 		uint64_t period_seed = w.block / 3;
 		if (m_nextProgpowPeriod == 0)
 		{
@@ -734,19 +737,16 @@ void Client::workLoop()
 			m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
 		}
 
-		con:
-		// Persist most recent job.
-		// Job's differences should be handled at higher level
-		m_work = w;
 
 		uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
 
 		// Eventually start searching
-		search(m_work.header.data(), upper64OfBoundary, m_work.startNonce, m_work);
+		search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, m_current);
 		
+		con:
 		
 		// Reset miner and stop working
-		//CUDA_SAFE_CALL(cudaDeviceReset());
+		CUDA_SAFE_CALL(cudaDeviceReset());
 	}
 	catch (cuda_runtime_error const& _e)
 	{
@@ -754,6 +754,57 @@ void Client::workLoop()
 		_what.append(_e.what());
 		throw std::runtime_error(_what);
 	}
+}
+
+void Client::onWorkRecieved(WorkPackage const& wp)
+{
+	// Should not happen !
+	if (!wp)
+		return;
+
+	int _currentEpoch = m_current.epoch;
+	bool newEpoch = (_currentEpoch == -1);
+
+	// In EthereumStratum/2.0.0 epoch number is set in session
+	if (!newEpoch)
+	{
+		newEpoch = (wp.seed != m_current.seed);
+	}
+
+	bool newDiff = (wp.boundary != m_current.boundary);
+
+	m_current = wp;
+
+	if (newEpoch)
+	{
+		m_epochChanges.fetch_add(1, std::memory_order_relaxed);
+
+		// If epoch is valued in workpackage take it
+		if (wp.epoch == -1)
+		{
+			if (m_current.block > 0)
+				m_current.epoch = m_current.block / EPOCH_LENGTH;
+			else
+				m_current.epoch = ethash::find_epoch_number(
+					ethash::hash256_from_bytes(m_current.seed.data()));
+		}
+	}
+	else
+	{
+		m_current.epoch = _currentEpoch;
+	}
+
+	if (newDiff || newEpoch)
+	{
+		double d = dev::getHashesToTarget(m_current.boundary.hex(dev::HexPrefix::Add));
+		cout << "Epoch : " EthWhite << m_current.epoch << EthReset << " Difficulty : " EthWhite
+		<< dev::getFormattedHashes(d) << EthReset << endl;
+	}
+
+	cout << "Job: " EthWhite << m_current.header.abridged()
+		<< (m_current.block != -1 ? (" block " + to_string(m_current.block)) : "") << EthReset << endl;
+
+	setWork(m_current);
 }
 
 string Client::startJson()
@@ -862,7 +913,6 @@ void Client::proccessResponse(Json::Value& res)
 
 		// This will signal to dispatch the job
 		
-		setWork();
 		m_newjobprocessed = true;
 		
 	}
@@ -1052,35 +1102,37 @@ void Client::enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection)
 	}
 }
 
-void Client::setWork()
+void Client::setWork(const WorkPackage& wp)
 {
-	ethash::epoch_context _ec = ethash::get_global_epoch_context(m_work.epoch);
-	m_epochContext.epochNumber = m_work.epoch;
+	ethash::epoch_context _ec = ethash::get_global_epoch_context(wp.epoch);
+	m_epochContext.epochNumber = wp.epoch;
 	m_epochContext.lightNumItems = _ec.light_cache_num_items;
 	m_epochContext.lightSize = ethash::get_light_cache_size(_ec.light_cache_num_items);
-	m_epochContext.dagNumItems = ethash::calculate_full_dataset_num_items(m_work.epoch);
+	m_epochContext.dagNumItems = ethash::calculate_full_dataset_num_items(wp.epoch);
 	m_epochContext.dagSize = ethash::get_full_dataset_size(m_epochContext.dagNumItems);
 	m_epochContext.lightCache = _ec.light_cache;
 
-	if (m_work.exSizeBytes == 0)
+	if (wp.exSizeBytes == 0)
 	{
 		random_device engine;
 		m_nonce_scrambler = uniform_int_distribution<uint64_t>()(engine);
 	}
 
 	uint64_t _startNonce;
-	if (m_work.exSizeBytes > 0)
+	if (wp.exSizeBytes > 0)
 	{
 		// Equally divide the residual segment among miners
-		_startNonce = m_work.startNonce;
+		_startNonce = wp.startNonce;
 		m_nonce_segment_with =
-			(unsigned int)log2(pow(2, 64 - (m_work.exSizeBytes * 4)));;
+			(unsigned int)log2(pow(2, 64 - (wp.exSizeBytes * 4)));;
 	}
 	else
 	{
 		// Get the randomly selected nonce
 		_startNonce = m_nonce_scrambler;
 	}
+
+	m_current = wp;
 }
 
 std::string padLeft(std::string _value, size_t _length, char _fillChar)

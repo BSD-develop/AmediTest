@@ -74,6 +74,7 @@ public:
     bool initEpoch();
     void search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w);
     void workLoop();
+    void onWorkRecieved(WorkPackage const& wp);
 
 
 private:
@@ -113,8 +114,9 @@ private:
     bool initDevice();
     int getNumDevices();
     void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
-    void setWork();
+    void setWork(const WorkPackage& wp);
 
+    std::atomic<unsigned> m_epochChanges = { 0 };
     std::atomic<bool> m_connected = { false };
     Json::StreamWriterBuilder m_jSwBuilder;
     WorkReceived m_onWorkReceived;
