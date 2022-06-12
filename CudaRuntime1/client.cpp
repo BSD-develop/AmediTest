@@ -18,6 +18,8 @@
 #include "ProgPow.h"
 #include "cuda_kernel.h"
 #include <nvrtc.h>
+#include "ethash.hpp"
+#include "ethash.h"
 
 boost::asio::io_service g_io_service;  // The IO service itself
 
@@ -213,26 +215,38 @@ void Client::startConversation()
 			}
 		
 
-		serverRes.erase(0, offset + 1);
-		offset = serverRes.find("\n");
-	}
+			serverRes.erase(0, offset + 1);
+			offset = serverRes.find("\n");
+		}
+
+	workLoop();
 
 	// send solution to server
-	workLoop();
+	string ss = sumbitSolution();
 	send(_clientSocket, sumbitSolution().c_str(), authorizeJson().size(), 0);
 	recv(_clientSocket, m, 1024, 0);
 	m[1023] = 0;
 
 	// get server response
 	serverRes = getResString(m);
-	std::cout << "Message from server: " << serverRes << std::endl;
+	json js = js.parse(serverRes);
+	while (js["id"] != "40")
+	{
+		recv(_clientSocket, m, 1024, 0);
+		m[1023] = 0;
+
+		// get server response
+		serverRes = getResString(m);
+		js = js.parse(serverRes);
+	}
+	std::cout << "\n\nMessage from server: " << serverRes << std::endl;
 
 	// check result
 	Json::Value j(serverRes);
 	if (j["result"] != "true")
-		cout << "\n\nFail !!!\n\n";
+		cout << EthRed "\n\nFail !!!\n\n" EthReset;
 	else
-		cout << "\n\nSuccess !!!\n\n";
+		cout << EthGreen "\n\nSuccess !!!\n\n" EthReset;
 
 }
 
@@ -320,7 +334,6 @@ void Client::compileKernel(uint64_t period_seed, uint64_t dag_elms, CUfunction& 
 	};
 	
 	CUmodule module;
-	cout << '\n' << module << endl;
 	try
 	{
 		CU_SAFE_CALL(cuModuleLoadDataEx(&module, ptx, 6, jitOpt, jitOptVal));
@@ -368,6 +381,8 @@ void Client::asyncCompile()
 	cuCtxSetCurrent(m_context);
 	//CUmodule module1;
 	//cout << '\n' << module1 << endl;
+	std::cout << m_nextProgpowPeriod << std::endl;
+	std::cout << m_epochContext.dagNumItems / 2 << std::endl;
 	compileKernel(m_nextProgpowPeriod, m_epochContext.dagNumItems / 2, m_kernel[m_kernelCompIx]);
 
 	//ThreadLocalLogName::name = saveName;
@@ -569,87 +584,84 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 	dev::h256 mixHashes[MAX_SEARCH_RESULTS];
 
 
-	while (!done)
+	// Exit next time around if there's new work awaiting
+	bool t = true;
+	
+
+	// This inner loop will process each cuda stream individually
+	for (current_index = 0; current_index < 2;
+		current_index++, start_nonce += m_batch_size)
 	{
-		// Exit next time around if there's new work awaiting
-		bool t = true;
+		// Each pass of this loop will wait for a stream to exit,
+		// save any found solutions, then restart the stream
+		// on the next group of nonces.
+		cudaStream_t stream = m_streams[current_index];
+
+		// Wait for the stream complete
+		CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
+
 		
 
-		// This inner loop will process each cuda stream individually
-		for (current_index = 0; current_index < 2;
-			current_index++, start_nonce += m_batch_size)
+		// Detect solutions in current stream's solution buffer
+		volatile Search_results& buffer(*m_search_buf[current_index]);
+		uint32_t found_count = min((unsigned)buffer.count, MAX_SEARCH_RESULTS);
+
+		if (found_count)
 		{
-			// Each pass of this loop will wait for a stream to exit,
-			// save any found solutions, then restart the stream
-			// on the next group of nonces.
-			cudaStream_t stream = m_streams[current_index];
+			buffer.count = 0;
 
-			// Wait for the stream complete
-			CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
+			// Extract solution and pass to higer level
+			// using io_service as dispatcher
 
-			
-
-			// Detect solutions in current stream's solution buffer
-			volatile Search_results& buffer(*m_search_buf[current_index]);
-			uint32_t found_count = min((unsigned)buffer.count, MAX_SEARCH_RESULTS);
-
-			if (found_count)
+			for (uint32_t i = 0; i < found_count; i++)
 			{
-				buffer.count = 0;
-
-				// Extract solution and pass to higer level
-				// using io_service as dispatcher
-
-				for (uint32_t i = 0; i < found_count; i++)
-				{
-					gids[i] = buffer.result[i].gid;
-					memcpy(mixHashes[i].data(), (void*)&buffer.result[i].mix,
-						sizeof(buffer.result[i].mix));
-				}
-			}
-
-			// restart the stream on the next batch of nonces
-			// unless we are done for this round.
-			if (!done)
-			{
-				volatile Search_results* Buffer = &buffer;
-				bool hack_false = false;
-				void* args[] = { &start_nonce, &current_header, &m_current_target, &dag, &Buffer, &hack_false };
-				CU_SAFE_CALL(cuLaunchKernel(m_kernel[m_kernelExecIx],  //
-					256, 1, 1,                         // grid dim
-					512, 1, 1,                        // block dim
-					0,                                                 // shared mem
-					stream,                                            // stream
-					args, 0));                                         // arguments
-			}
-			if (found_count)
-			{
-				uint64_t nonce_base = start_nonce - m_streams_batch_size;
-				for (uint32_t i = 0; i < found_count; i++)
-				{
-					uint64_t nonce = nonce_base + gids[i];
-
-					Solution s;
-					s.nonce = nonce;
-					s.mixHash = mixHashes[i];
-					s.tstamp = std::chrono::steady_clock::now();
-					s.work = w;
-					s.midx = m_index;
-				
-					_s = s;
-
-					double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
-
-					cout << EthWhite << "Job: " << w.header.abridged() << " Sol: 0x"
-						<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
-				}
+				gids[i] = buffer.result[i].gid;
+				memcpy(mixHashes[i].data(), (void*)&buffer.result[i].mix,
+					sizeof(buffer.result[i].mix));
 			}
 		}
+
+		// restart the stream on the next batch of nonces
+		// unless we are done for this round.
+		if (!done)
+		{
+			volatile Search_results* Buffer = &buffer;
+			bool hack_false = false;
+			void* args[] = { &start_nonce, &current_header, &m_current_target, &dag, &Buffer, &hack_false };
+			CU_SAFE_CALL(cuLaunchKernel(m_kernel[m_kernelExecIx],  //
+				256, 1, 1,                         // grid dim
+				512, 1, 1,                        // block dim
+				0,                                                 // shared mem
+				stream,                                            // stream
+				args, 0));                                         // arguments
+		}
+		if (found_count)
+		{
+			uint64_t nonce_base = start_nonce - m_streams_batch_size;
+			for (uint32_t i = 0; i < found_count; i++)
+			{
+				uint64_t nonce = nonce_base + gids[i];
+
+				Solution s;
+				s.nonce = nonce;
+				s.mixHash = mixHashes[i];
+				s.tstamp = std::chrono::steady_clock::now();
+				s.work = w;
+				s.midx = m_index;
+			
+				_s = s;
+
+				double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
+
+				cout << EthWhite << "Job: " << w.header.abridged() << " Sol: 0x"
+					<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
+			}
+		}
+	}
 
 		// Update the hash rate
 		//dev::eth::updateHashRate(m_batch_size, m_settings.streams);
 
-	}
 
 #ifdef DEV_BUILD
 	// Optionally log job switch time
@@ -725,15 +737,16 @@ void Client::workLoop()
 		con:
 		// Persist most recent job.
 		// Job's differences should be handled at higher level
-		current = w;
+		m_work = w;
+
 		uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
 
 		// Eventually start searching
-		search(current.header.data(), upper64OfBoundary, current.startNonce, current);
+		search(m_work.header.data(), upper64OfBoundary, m_work.startNonce, m_work);
 		
 		
 		// Reset miner and stop working
-		CUDA_SAFE_CALL(cudaDeviceReset());
+		//CUDA_SAFE_CALL(cudaDeviceReset());
 	}
 	catch (cuda_runtime_error const& _e)
 	{
@@ -848,7 +861,8 @@ void Client::proccessResponse(Json::Value& res)
 		m_current.block = iBlockHeight;
 
 		// This will signal to dispatch the job
-		// at the end of the transmission.
+		
+		setWork();
 		m_newjobprocessed = true;
 		
 	}
@@ -872,7 +886,7 @@ string Client::sumbitSolution()
 	if (!m_rig.empty())
 		jReq["worker"] = m_rig;
 
-	return jReq.toStyledString() + "\n";
+	return boost::algorithm::replace_all_copy(jReq.toStyledString(), "\n", "") + '\n';
 }
 
 bool Client::processExt(string& enonce)
@@ -923,9 +937,9 @@ bool Client::processExt(string& enonce)
 
 bool Client::initDevice()
 {
-	cout << "Using Pci Id : " << m_deviceDescriptor.uniqueId << " " << m_deviceDescriptor.cuName
+	cout << "\nUsing Pci Id : " << m_deviceDescriptor.uniqueId << " " << m_deviceDescriptor.cuName
 		<< " (Compute " + m_deviceDescriptor.cuCompute + ") Memory : "
-		<< dev::getFormattedMemory((double)m_deviceDescriptor.totalMemory);
+		<< dev::getFormattedMemory((double)m_deviceDescriptor.totalMemory) << endl;
 
 	// Set Hardware Monitor Info
 	m_hwmoninfo.deviceType = HwMonitorInfoType::NVIDIA;
@@ -1035,6 +1049,37 @@ void Client::enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection)
 		{
 			std::cerr << _e.what() << std::endl;
 		}
+	}
+}
+
+void Client::setWork()
+{
+	ethash::epoch_context _ec = ethash::get_global_epoch_context(m_work.epoch);
+	m_epochContext.epochNumber = m_work.epoch;
+	m_epochContext.lightNumItems = _ec.light_cache_num_items;
+	m_epochContext.lightSize = ethash::get_light_cache_size(_ec.light_cache_num_items);
+	m_epochContext.dagNumItems = ethash::calculate_full_dataset_num_items(m_work.epoch);
+	m_epochContext.dagSize = ethash::get_full_dataset_size(m_epochContext.dagNumItems);
+	m_epochContext.lightCache = _ec.light_cache;
+
+	if (m_work.exSizeBytes == 0)
+	{
+		random_device engine;
+		m_nonce_scrambler = uniform_int_distribution<uint64_t>()(engine);
+	}
+
+	uint64_t _startNonce;
+	if (m_work.exSizeBytes > 0)
+	{
+		// Equally divide the residual segment among miners
+		_startNonce = m_work.startNonce;
+		m_nonce_segment_with =
+			(unsigned int)log2(pow(2, 64 - (m_work.exSizeBytes * 4)));;
+	}
+	else
+	{
+		// Get the randomly selected nonce
+		_startNonce = m_nonce_scrambler;
 	}
 }
 

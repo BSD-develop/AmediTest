@@ -113,6 +113,7 @@ private:
     bool initDevice();
     int getNumDevices();
     void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
+    void setWork();
 
     std::atomic<bool> m_connected = { false };
     Json::StreamWriterBuilder m_jSwBuilder;
@@ -131,6 +132,8 @@ private:
     boost::condition_variable m_new_work_signal;
     boost::condition_variable m_dag_loaded_signal;
     
+    uint64_t m_nonce_scrambler;
+    unsigned int m_nonce_segment_with = 32;
     CUSettings m_CUSettings;
     boost::thread* m_compileThread = nullptr;
     uint64_t m_nextProgpowPeriod = 0;

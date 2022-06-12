@@ -178,9 +178,9 @@ void ethash_generate_dag(
 void set_constants(hash64_t* _dag, uint32_t _dag_size, hash64_t* _light, uint32_t _light_size)
 {
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_dag, &_dag, sizeof(hash64_t*)));
-	CUDA_SAFE_CALL(cudaMemcpyToSymbol(&d_dag_size, &_dag_size, sizeof(uint32_t)));
+	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_dag_size, &_dag_size, sizeof(uint32_t)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_light, &_light, sizeof(hash64_t*)));
-	CUDA_SAFE_CALL(cudaMemcpyToSymbol(&d_light_size, &_light_size, sizeof(uint32_t)));
+	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_light_size, &_light_size, sizeof(uint32_t)));
 }
 
 void get_constants(hash64_t** _dag, uint32_t* _dag_size, hash64_t** _light, uint32_t* _light_size)
@@ -198,7 +198,7 @@ void get_constants(hash64_t** _dag, uint32_t* _dag_size, hash64_t** _light, uint
 	if (_dag_size)
 	{
 		uint32_t _ds;
-		CUDA_SAFE_CALL(cudaMemcpyFromSymbol(&_ds, &d_dag_size, sizeof(uint32_t)));
+		CUDA_SAFE_CALL(cudaMemcpyFromSymbol(&_ds, d_dag_size, sizeof(uint32_t)));
 		*_dag_size = _ds;
 	}
 	if (_light)
@@ -210,7 +210,7 @@ void get_constants(hash64_t** _dag, uint32_t* _dag_size, hash64_t** _light, uint
 	if (_light_size)
 	{
 		uint32_t _ls;
-		CUDA_SAFE_CALL(cudaMemcpyFromSymbol(&_ls, &d_light_size, sizeof(uint32_t)));
+		CUDA_SAFE_CALL(cudaMemcpyFromSymbol(&_ls, d_light_size, sizeof(uint32_t)));
 		*_light_size = _ls;
 	}
 }
@@ -224,3 +224,4 @@ void set_target(uint64_t _target)
 {
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_target, &_target, sizeof(uint64_t)));
 }
+

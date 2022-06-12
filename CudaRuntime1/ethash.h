@@ -6,7 +6,6 @@
 #pragma once
 
 #include "hash_types.h"
-
 #include <stdbool.h>
 #include <stdint.h>
 

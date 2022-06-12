@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "FixedHash.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,13 +20,13 @@ extern "C" {
         char str[32];
     };
 
-    union ethash_hash512
+    /*union ethash_hash512
     {
         uint64_t word64s[8];
         uint32_t word32s[16];
         uint8_t bytes[64];
         char str[64];
-    };
+    };*/
 
     union ethash_hash1024
     {
