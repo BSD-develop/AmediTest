@@ -20,6 +20,7 @@
 #include <nvrtc.h>
 #include "ethash.hpp"
 #include "ethash.h"
+#include "progpow.hpp"
 
 boost::asio::io_service g_io_service;  // The IO service itself
 
@@ -224,6 +225,7 @@ void Client::startConversation()
 
 	// send solution to server
 	string ss = sumbitSolution();
+	cout << "\n\n" << ss << endl;
 	send(_clientSocket, sumbitSolution().c_str(), authorizeJson().size(), 0);
 	recv(_clientSocket, m, 1024, 0);
 	m[1023] = 0;
@@ -231,6 +233,7 @@ void Client::startConversation()
 	// get server response
 	serverRes = getResString(m);
 	json js = js.parse(serverRes);
+	std::cout << "\n\nMessage from server: " << serverRes << std::endl;
 	while (js["id"] != "40")
 	{
 		recv(_clientSocket, m, 1024, 0);
@@ -240,7 +243,6 @@ void Client::startConversation()
 		serverRes = getResString(m);
 		js = js.parse(serverRes);
 	}
-	std::cout << "\n\nMessage from server: " << serverRes << std::endl;
 
 	// check result
 	Json::Value j(serverRes);
@@ -382,8 +384,7 @@ void Client::asyncCompile()
 	cuCtxSetCurrent(m_context);
 	//CUmodule module1;
 	//cout << '\n' << module1 << endl;
-	std::cout << m_nextProgpowPeriod << std::endl;
-	std::cout << m_epochContext.dagNumItems / 2 << std::endl;
+
 	compileKernel(m_nextProgpowPeriod, m_epochContext.dagNumItems / 2, m_kernel[m_kernelCompIx]);
 
 	//ThreadLocalLogName::name = saveName;
@@ -451,7 +452,7 @@ bool Client::initEpoch_internal()
 			if (m_device_dag) CUDA_SAFE_CALL(cudaFree(reinterpret_cast<void*>(m_device_dag)));
 
 			cout << "Generating DAG + Light : "
-				<< dev::getFormattedMemory((double)RequiredMemory);
+				<< dev::getFormattedMemory((double)RequiredMemory) << endl;
 
 			// create buffer for cache
 			CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&m_device_light), m_epochContext.lightSize));
@@ -481,7 +482,7 @@ bool Client::initEpoch_internal()
 			.count()
 			<< " ms. "
 			<< dev::getFormattedMemory((double)(m_deviceDescriptor.totalMemory - RequiredMemory))
-			<< " left.";
+			<< " left." << endl;
 
 		retVar = true;
 	}
@@ -537,16 +538,18 @@ bool Client::initEpoch()
 
 void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w)
 {
-
-	hash32_t he = *reinterpret_cast<hash32_t const*>(header);
-	set_header(he);
+	if (header == nullptr)
+	{
+		return;
+	}
+	set_header(*reinterpret_cast<hash32_t const*>(&header));
 
 	if (m_current_target != target)
 	{
 		set_target(target);
 		m_current_target = target;
 	}
-	hash32_t current_header = *reinterpret_cast<hash32_t const*>(header);
+	hash32_t current_header = *reinterpret_cast<hash32_t const*>(&header);
 	hash64_t* dag;
 	get_constants(&dag, NULL, NULL, NULL);
 
@@ -588,77 +591,83 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 	dev::h256 mixHashes[MAX_SEARCH_RESULTS];
 
 
-	// Exit next time around if there's new work awaiting
-	bool t = true;
-	
-
-	// This inner loop will process each cuda stream individually
-	for (current_index = 0; current_index < 2;
-		current_index++, start_nonce += m_batch_size)
+	// Exit next time around if there's new work awaiting	
+	while (!done)
 	{
-		// Each pass of this loop will wait for a stream to exit,
-		// save any found solutions, then restart the stream
-		// on the next group of nonces.
-		cudaStream_t stream = m_streams[current_index];
 
-		// Wait for the stream complete
-		CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
 
-		
-
-		// Detect solutions in current stream's solution buffer
-		volatile Search_results& buffer(*m_search_buf[current_index]);
-		uint32_t found_count = min((unsigned)buffer.count, MAX_SEARCH_RESULTS);
-
-		if (found_count)
+		// This inner loop will process each cuda stream individually
+		for (current_index = 0; current_index < 2;
+			current_index++, start_nonce += m_batch_size)
 		{
-			buffer.count = 0;
+			// Each pass of this loop will wait for a stream to exit,
+			// save any found solutions, then restart the stream
+			// on the next group of nonces.
+			cudaStream_t stream = m_streams[current_index];
 
-			// Extract solution and pass to higer level
-			// using io_service as dispatcher
+			// Wait for the stream complete
+			CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
 
-			for (uint32_t i = 0; i < found_count; i++)
+			if (m_state != WorkerState::Started)
 			{
-				gids[i] = buffer.result[i].gid;
-				memcpy(mixHashes[i].data(), (void*)&buffer.result[i].mix,
-					sizeof(buffer.result[i].mix));
+				m_new_work.store(false, std::memory_order_relaxed);
+				done = true;
 			}
-		}
 
-		// restart the stream on the next batch of nonces
-		// unless we are done for this round.
-		if (!done)
-		{
-			volatile Search_results* Buffer = &buffer;
-			bool hack_false = false;
-			void* args[] = { &start_nonce, &current_header, &m_current_target, &dag, &Buffer, &hack_false };
-			CU_SAFE_CALL(cuLaunchKernel(m_kernel[m_kernelExecIx],  //
-				256, 1, 1,                         // grid dim
-				512, 1, 1,                        // block dim
-				0,                                                 // shared mem
-				stream,                                            // stream
-				args, 0));                                         // arguments
-		}
-		if (found_count)
-		{
-			uint64_t nonce_base = start_nonce - m_streams_batch_size;
-			for (uint32_t i = 0; i < found_count; i++)
+			// Detect solutions in current stream's solution buffer
+			volatile Search_results& buffer(*m_search_buf[current_index]);
+			uint32_t found_count = min((unsigned)buffer.count, MAX_SEARCH_RESULTS);
+
+			if (found_count)
 			{
-				uint64_t nonce = nonce_base + gids[i];
+				buffer.count = 0;
 
-				Solution s;
-				s.nonce = nonce;
-				s.mixHash = mixHashes[i];
-				s.tstamp = std::chrono::steady_clock::now();
-				s.work = w;
-				s.midx = m_index;
-			
-				_s = s;
+				// Extract solution and pass to higer level
+				// using io_service as dispatcher
 
-				double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
+				for (uint32_t i = 0; i < found_count; i++)
+				{
+					gids[i] = buffer.result[i].gid;
+					memcpy(mixHashes[i].data(), (void*)&buffer.result[i].mix,
+						sizeof(buffer.result[i].mix));
+				}
+			}
 
-				cout << EthWhite << "Job: " << w.header.abridged() << " Sol: 0x"
-					<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
+			// restart the stream on the next batch of nonces
+			// unless we are done for this round.
+			if (!done)
+			{
+				volatile Search_results* Buffer = &buffer;
+				bool hack_false = false;
+				void* args[] = { &start_nonce, &current_header, &m_current_target, &dag, &Buffer, &hack_false };
+				CU_SAFE_CALL(cuLaunchKernel(m_kernel[m_kernelExecIx],  //
+					256, 1, 1,                         // grid dim
+					512, 1, 1,                        // block dim
+					0,                                                 // shared mem
+					stream,                                            // stream
+					args, 0));                                         // arguments
+			}
+			if (found_count)
+			{
+				uint64_t nonce_base = start_nonce - m_streams_batch_size;
+				for (uint32_t i = 0; i < found_count; i++)
+				{
+					uint64_t nonce = nonce_base + gids[i];
+
+					Solution s;
+					s.nonce = nonce;
+					s.mixHash = mixHashes[i];
+					s.tstamp = std::chrono::steady_clock::now();
+					s.work = w;
+					s.midx = m_index;
+
+					submitProof(s);
+
+					double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
+
+					cout << EthWhite << "Job: " << w.header.abridged() << " Sol: 0x"
+						<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
+				}
 			}
 		}
 	}
@@ -696,57 +705,62 @@ void Client::workLoop()
 
 	try
 	{
-		const WorkPackage w = m_current;
-		if (!w)
+		while (m_state != WorkerState::Started)
 		{
-			boost::system_time const timeout =
-				boost::get_system_time() + boost::posix_time::seconds(3);
-			boost::mutex::scoped_lock l(x_work);
-			m_new_work_signal.timed_wait(l, timeout);
-			goto con;
-		}
 
-		bool f = initEpoch();
-		if (!f)
-			goto con;  // This will simply exit the thread
-		old_epoch = w.epoch;
-		
-
-		//setWork(w);
-
-		uint64_t period_seed = w.block / 3;
-		if (m_nextProgpowPeriod == 0)
-		{
-			m_nextProgpowPeriod = period_seed;
-			m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
-		}
-		if (old_period_seed != period_seed)
-		{
-			m_compileThread->join();
-			// sanity check the next kernel
-			if (period_seed != m_nextProgpowPeriod)
+			const WorkPackage w = m_current;
+			if (!w)
 			{
-				// This shouldn't happen!!! Try to recover
-				m_nextProgpowPeriod = period_seed;
-				m_compileThread =
-					new boost::thread(boost::bind(&Client::asyncCompile, this));
-				m_compileThread->join();
+				boost::system_time const timeout =
+					boost::get_system_time() + boost::posix_time::seconds(3);
+				boost::mutex::scoped_lock l(x_work);
+				m_new_work_signal.timed_wait(l, timeout);
+				continue;
 			}
-			old_period_seed = period_seed;
-			m_kernelExecIx ^= 1;
-			cout << "Launching period " << period_seed << " ProgPow kernel";
-			m_nextProgpowPeriod = period_seed + 1;
-			m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
+
+			if (old_epoch != w.epoch)
+			{
+				if (!initEpoch())
+					break;  // This will simply exit the thread
+				old_epoch = w.epoch;
+				continue;
+			}
+
+
+			//setWork(w);
+
+			uint64_t period_seed = w.block / 3;
+			if (m_nextProgpowPeriod == 0)
+			{
+				m_nextProgpowPeriod = period_seed;
+				m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
+			}
+			if (old_period_seed != period_seed)
+			{
+				m_compileThread->join();
+				// sanity check the next kernel
+				if (period_seed != m_nextProgpowPeriod)
+				{
+					// This shouldn't happen!!! Try to recover
+					m_nextProgpowPeriod = period_seed;
+					m_compileThread =
+						new boost::thread(boost::bind(&Client::asyncCompile, this));
+					m_compileThread->join();
+				}
+				old_period_seed = period_seed;
+				m_kernelExecIx ^= 1;
+				cout << "Launching period " << period_seed << " ProgPow kernel";
+				m_nextProgpowPeriod = period_seed + 1;
+				m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
+			}
+
+
+			uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
+
+			// Eventually start searching
+			search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, w);
+
 		}
-
-
-		uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
-
-		// Eventually start searching
-		search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, m_current);
-		
-		con:
-		
 		// Reset miner and stop working
 		CUDA_SAFE_CALL(cudaDeviceReset());
 	}
@@ -1135,6 +1149,31 @@ void Client::setWork(const WorkPackage& wp)
 	}
 
 	m_current = wp;
+}
+
+void Client::submitProof(Solution const& s)
+{
+	const bool dbuild = false;
+	Result r = eval(s.work.epoch, s.work.block, s.work.header, s.nonce);
+	if (r.value > s.work.get_boundary())
+	{
+		cout << "GPU " << s.midx
+			<< " gave incorrect result. Lower overclocking values if it happens frequently.";
+		return;
+	}
+	if (dbuild && (s.mixHash != r.mixHash))
+		cout << "GPU " << s.midx << " mix missmatch";
+	_s = Solution{ s.nonce, r.mixHash, s.work, s.tstamp, s.midx };
+}
+
+Result Client::eval(int epoch, int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept
+{
+	auto headerHash = ethash::hash256_from_bytes(_headerHash.data());
+	auto& context = ethash::get_global_epoch_context(epoch);
+	progpow::result result = ethash::hash(context, headerHash, _nonce);
+	dev::h256 mix{ reinterpret_cast<byte*>(result.mix_hash.bytes), dev::h256::ConstructFromPointer };
+	dev::h256 final{ reinterpret_cast<byte*>(result.final_hash.bytes), dev::h256::ConstructFromPointer };
+	return { final, mix };
 }
 
 std::string padLeft(std::string _value, size_t _length, char _fillChar)

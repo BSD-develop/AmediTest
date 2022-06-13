@@ -78,6 +78,7 @@ public:
 
 
 private:
+    std::atomic<WorkerState> m_state = { WorkerState::Starting };
     std::map<std::string, DeviceDescriptor> m_DevicesCollection = {};
     DeviceDescriptor m_deviceDescriptor;
     string m_wallet;
@@ -115,6 +116,8 @@ private:
     int getNumDevices();
     void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
     void setWork(const WorkPackage& wp);
+    void submitProof(Solution const& s);
+    Result eval(int epoch, int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept;
 
     std::atomic<unsigned> m_epochChanges = { 0 };
     std::atomic<bool> m_connected = { false };

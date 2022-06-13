@@ -43,6 +43,15 @@ struct WorkPackage
     std::string algo = "ethash";
 };
 
+enum class WorkerState
+{
+    Starting,
+    Started,
+    Stopping,
+    Stopped,
+    Killing
+};
+
 struct LogChannel
 {
     static const char* name();

@@ -27,7 +27,7 @@ namespace progpow
     constexpr size_t l1_cache_size = 16 * 1024;
     constexpr size_t l1_cache_num_items = l1_cache_size / sizeof(uint32_t);
 
-    result hash(const epoch_context& context, int block_number, const hash256& header_hash,
+    result hash(const epoch_context & context, int block_number, const hash256& header_hash,
         uint64_t nonce) noexcept;
 
     result hash(const epoch_context_full& context, int block_number, const hash256& header_hash,

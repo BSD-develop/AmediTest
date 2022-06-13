@@ -1,6 +1,8 @@
 #include "ProgPow.h"
 
 #include <sstream>
+#include "progpow.hpp"
+#include "ethash.hpp"
 
 #define rnd() (kiss99(rnd_state))
 #define mix_src()   ("mix[" + std::to_string(rnd() % PROGPOW_REGS) + "]")
@@ -13,6 +15,35 @@ void swap(int& a, int& b)
     a = b;
     b = t;
 }
+
+static const uint32_t round_constants[22] = {
+        0x00000001,0x00008082,0x0000808A,
+        0x80008000,0x0000808B,0x80000001,
+        0x80008081,0x00008009,0x0000008A,
+        0x00000088,0x80008009,0x8000000A,
+        0x8000808B,0x0000008B,0x00008089,
+        0x00008003,0x00008002,0x00000080,
+        0x0000800A,0x8000000A,0x80008081,
+        0x00008080,
+};
+
+static const uint32_t ravencoin_kawpow[15] = {
+        0x00000072, //R
+        0x00000041, //A
+        0x00000056, //V
+        0x00000045, //E
+        0x0000004E, //N
+        0x00000043, //C
+        0x0000004F, //O
+        0x00000049, //I
+        0x0000004E, //N
+        0x0000004B, //K
+        0x00000041, //A
+        0x00000057, //W
+        0x00000050, //P
+        0x0000004F, //O
+        0x00000057, //W
+};
 
 std::string ProgPow::getKern(uint64_t prog_seed, kernel_t kern)
 {
