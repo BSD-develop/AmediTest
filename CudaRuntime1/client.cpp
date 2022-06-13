@@ -594,7 +594,9 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 	// Exit next time around if there's new work awaiting	
 	while (!done)
 	{
-
+		// Exit next time around if there's new work awaiting
+		bool t = true;
+		done = m_new_work.compare_exchange_weak(t, false, std::memory_order_relaxed);
 
 		// This inner loop will process each cuda stream individually
 		for (current_index = 0; current_index < 2;
@@ -726,9 +728,6 @@ void Client::workLoop()
 				continue;
 			}
 
-
-			//setWork(w);
-
 			uint64_t period_seed = w.block / 3;
 			if (m_nextProgpowPeriod == 0)
 			{
@@ -758,6 +757,10 @@ void Client::workLoop()
 			uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
 
 			// Eventually start searching
+			/*auto headerHash = ethash::hash256_from_bytes(m_current.header.data());
+			auto b = ethash::hash256_from_bytes(m_current.boundary.data());
+			auto& context = ethash::get_global_epoch_context(m_current.epoch);
+			ethash::search_result sr = ethash::search_light(context, headerHash, b,m_current.startNonce, m_batch_size);*/
 			search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, w);
 
 		}
