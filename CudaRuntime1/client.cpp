@@ -30,6 +30,12 @@ unsigned Client::s_dagLoadMode = 0;
 unsigned Client::s_dagLoadIndex = 0;
 unsigned Client::s_minersCount = 0;
 
+volatile sig_atomic_t stop;
+
+void inthand(int signum) {
+	stop = 1;
+}
+
 Client::Client(string wallet, string rig) : 
 	m_workloop_timer(g_io_service), m_io_strand(g_io_service),
 	m_batch_size(256* 512),
@@ -156,33 +162,38 @@ void Client::startConversation()
 
 	// get server response
 	serverRes = getResString(m);
-	std::cout << "Message from server: " << serverRes << std::endl;
 
+	signal(SIGINT, inthand);
 
-	/*
-	*	 get server response - set target
-	*/
-	recv(_clientSocket, m, 1024, 0);
-	m[1023] = 0;
+	while (true)
+	{
+		/*
+		*	 get server response - set target
+		*/
 
-	// get server response
-	serverRes = getResString(m);
-	std::cout << "Message from server: " << serverRes << std::endl;
+		recv(_clientSocket, m, 1024, 0);
+		m[1023] = 0;
 
+		// get server response
+		serverRes = getResString(m);
+		json js1 = js1.parse(serverRes);
+		if (js1["method"] == "mining.notify")
+		{
+			goto pr;
+		}
+		/*
+		*	 get server response - notify
+		*/
+		recv(_clientSocket, m, 1024, 0);
+		m[1023] = 0;
 
-	/*
-	*	 get server response - notify
-	*/
-	recv(_clientSocket, m, 1024, 0);
-	m[1023] = 0;
+		// get server response
+		serverRes = getResString(m);
 
-	// get server response
-	serverRes = getResString(m);
-	std::cout << "Message from server: " << serverRes << std::endl;
-
-	m_newjobprocessed = false;
-	std::string line;
-	size_t offset = serverRes.find("\n");
+	pr:
+		m_newjobprocessed = false;
+		std::string line;
+		size_t offset = serverRes.find("\n");
 
 		if (offset > 0)
 		{
@@ -214,48 +225,50 @@ void Client::startConversation()
 					cout << "Stratum got invalid Json message : " << what;
 				}
 			}
-		
+
 
 			serverRes.erase(0, offset + 1);
 			offset = serverRes.find("\n");
 		}
-	
-	onWorkRecieved(m_current);
 
-	WorkerState ex = WorkerState::Starting;
-	bool ok = m_state.compare_exchange_weak(ex, WorkerState::Started, std::memory_order_relaxed);
-	(void)ok;
+		onWorkRecieved(m_current);
 
-	workLoop();
+		WorkerState ex = WorkerState::Starting;
+		bool ok = m_state.compare_exchange_weak(ex, WorkerState::Started, std::memory_order_relaxed);
+		(void)ok;
 
-	// send solution to server
-	string ss = sumbitSolution();
-	cout << "\n\n" << ss << endl;
-	send(_clientSocket, sumbitSolution().c_str(), authorizeJson().size(), 0);
-	recv(_clientSocket, m, 1024, 0);
-	m[1023] = 0;
+		workLoop();
 
-	// get server response
-	serverRes = getResString(m);
-	json js = js.parse(serverRes);
-	std::cout << "\n\nMessage from server: " << serverRes << std::endl;
-	while (js["id"] != "40")
-	{
+		// send solution to server
+		string ss = sumbitSolution();
+		send(_clientSocket, ss.c_str(), ss.size(), 0);
 		recv(_clientSocket, m, 1024, 0);
 		m[1023] = 0;
 
 		// get server response
 		serverRes = getResString(m);
-		js = js.parse(serverRes);
+		json js = js.parse(serverRes);
+		while (js["id"] != 40)
+		{
+			recv(_clientSocket, m, 1024, 0);
+			m[1023] = 0;
+
+			// get server response
+			serverRes = getResString(m);
+			js = js.parse(serverRes);
+		}
+		std::cout << "\n\nMessage from server: " << serverRes << std::endl;
+
+		// check result
+		json j = j.parse(serverRes);
+		if (j["result"] != "true")
+			cout << EthRed "\n\nFail !!!\n\n" EthReset;
+		else
+			cout << EthGreen "\n\nSuccess !!!\n\n" EthReset;
 	}
 
-	// check result
-	Json::Value j(serverRes);
-	if (j["result"] != "true")
-		cout << EthRed "\n\nFail !!!\n\n" EthReset;
-	else
-		cout << EthGreen "\n\nSuccess !!!\n\n" EthReset;
-
+	// Reset miner and stop working
+	CUDA_SAFE_CALL(cudaDeviceReset());
 }
 
 void Client::compileKernel(uint64_t period_seed, uint64_t dag_elms, CUfunction& kernel)
@@ -772,8 +785,6 @@ void Client::workLoop()
 			search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, w);
 
 		}
-		// Reset miner and stop working
-		CUDA_SAFE_CALL(cudaDeviceReset());
 	}
 	catch (cuda_runtime_error const& _e)
 	{
@@ -966,7 +977,9 @@ string Client::sumbitSolution()
 	if (!m_rig.empty())
 		jReq["worker"] = m_rig;
 
-	return boost::algorithm::replace_all_copy(jReq.toStyledString(), "\n", "") + '\n';
+	string ret = boost::algorithm::replace_all_copy(jReq.toStyledString(), "\n", "");
+	ret = boost::algorithm::replace_all_copy(ret, " ", "") + '\n';
+	return ret;
 }
 
 bool Client::processExt(string& enonce)
@@ -1169,14 +1182,13 @@ void Client::setWork(const WorkPackage& wp)
 void Client::submitProof(Solution const& s)
 {
 	const bool dbuild = false;
-	cout << s.nonce << endl;
 	Result r = eval(s.work.epoch, s.work.block, s.work.header, s.nonce);
-	if (r.value > s.work.get_boundary())
+	/*if (r.value > s.work.get_boundary())
 	{
 		cout << "GPU " << s.midx
 			<< " gave incorrect result. Lower overclocking values if it happens frequently.";
 		return;
-	}
+	}*/
 	if (dbuild && (s.mixHash != r.mixHash))
 		cout << "GPU " << s.midx << " mix missmatch";
 	_s = Solution{ s.nonce, r.mixHash, s.work, s.tstamp, s.midx };
@@ -1187,7 +1199,9 @@ Result Client::eval(int epoch, int _block_number, dev::h256 const& _headerHash, 
 	auto headerHash = ethash::hash256_from_bytes(_headerHash.data());
 	auto& context = ethash::get_global_epoch_context(epoch);
 	//progpow::result result = ethash::hash(context, headerHash, _nonce);
-	progpow::result result = progpow::hash(context, _block_number,headerHash, _nonce);
+	progpow::result result = progpow::hash(context, _block_number, headerHash, _nonce);
+	cout << "\n" << endl;
+	//progpow::hash_one(context, _block_number, &headerHash, _nonce, &ethash::hash256_from_bytes(result.mix_hash.bytes), &ethash::hash256_from_bytes(result.final_hash.bytes));
 	dev::h256 mix{ reinterpret_cast<byte*>(result.mix_hash.bytes), dev::h256::ConstructFromPointer };
 	dev::h256 final{ reinterpret_cast<byte*>(result.final_hash.bytes), dev::h256::ConstructFromPointer };
 	return { final, mix };

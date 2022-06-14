@@ -116,12 +116,6 @@
       <Filter>imported</Filter>
     </ClInclude>
     <ClInclude Include="structs.h" />
-    <ClInclude Include="ethash.h">
-      <Filter>imported</Filter>
-    </ClInclude>
-    <ClInclude Include="ethash.hpp">
-      <Filter>imported</Filter>
-    </ClInclude>
     <ClInclude Include="hash_types.h">
       <Filter>imported</Filter>
     </ClInclude>
@@ -151,6 +145,12 @@
       <Filter>json</Filter>
     </ClInclude>
     <ClInclude Include="cuda_kernel.h" />
+    <ClInclude Include="ethash.hpp">
+      <Filter>progpow</Filter>
+    </ClInclude>
+    <ClInclude Include="ethash.h">
+      <Filter>progpow</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="imported">
