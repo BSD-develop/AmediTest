@@ -221,6 +221,11 @@ void Client::startConversation()
 		}
 	
 	onWorkRecieved(m_current);
+
+	WorkerState ex = WorkerState::Starting;
+	bool ok = m_state.compare_exchange_weak(ex, WorkerState::Started, std::memory_order_relaxed);
+	(void)ok;
+
 	workLoop();
 
 	// send solution to server
@@ -667,8 +672,11 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 
 					double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
 
-					cout << EthWhite << "Job: " << w.header.abridged() << " Sol: 0x"
+					cout << EthWhite << "\n\nJob: " << w.header.abridged() << " Sol: 0x"
 						<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
+
+					m_state = WorkerState::Stopping;
+					return;
 				}
 			}
 		}
@@ -707,7 +715,7 @@ void Client::workLoop()
 
 	try
 	{
-		while (m_state != WorkerState::Started)
+		while (m_state == WorkerState::Started)
 		{
 
 			const WorkPackage w = m_current;
@@ -942,15 +950,18 @@ string Client::sumbitSolution()
 	Json::Value jReq;
 
 	unsigned id = 40 + _s.midx;
-	jReq["id"] = id;
+	jReq["id"] = 40;
 	m_solution_submitted_max_id = max(m_solution_submitted_max_id, id);
 	jReq["method"] = "mining.submit";
 	jReq["params"] = Json::Value(Json::arrayValue);
 	jReq["jsonrpc"] = "2.0";
 	jReq["params"].append(m_wallet + "." + m_rig);
+	//EMPTY
 	jReq["params"].append(_s.work.job);
+	//EMPTY
 	jReq["params"].append(dev::toHex(_s.nonce, dev::HexPrefix::Add));
 	jReq["params"].append(_s.work.header.hex(dev::HexPrefix::Add));
+	//EMPTY
 	jReq["params"].append(_s.mixHash.hex(dev::HexPrefix::Add));
 	if (!m_rig.empty())
 		jReq["worker"] = m_rig;
@@ -1152,11 +1163,13 @@ void Client::setWork(const WorkPackage& wp)
 	}
 
 	m_current = wp;
+	m_new_work.store(true, std::memory_order_relaxed);
 }
 
 void Client::submitProof(Solution const& s)
 {
 	const bool dbuild = false;
+	cout << s.nonce << endl;
 	Result r = eval(s.work.epoch, s.work.block, s.work.header, s.nonce);
 	if (r.value > s.work.get_boundary())
 	{
@@ -1173,7 +1186,8 @@ Result Client::eval(int epoch, int _block_number, dev::h256 const& _headerHash, 
 {
 	auto headerHash = ethash::hash256_from_bytes(_headerHash.data());
 	auto& context = ethash::get_global_epoch_context(epoch);
-	progpow::result result = ethash::hash(context, headerHash, _nonce);
+	//progpow::result result = ethash::hash(context, headerHash, _nonce);
+	progpow::result result = progpow::hash(context, _block_number,headerHash, _nonce);
 	dev::h256 mix{ reinterpret_cast<byte*>(result.mix_hash.bytes), dev::h256::ConstructFromPointer };
 	dev::h256 final{ reinterpret_cast<byte*>(result.final_hash.bytes), dev::h256::ConstructFromPointer };
 	return { final, mix };
