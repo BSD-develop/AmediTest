@@ -11,6 +11,7 @@
 #include <boost/format.hpp>
 #include <boost/thread.hpp>
 #include <boost/asio.hpp>
+#include <queue>
 
 using WorkReceived = function<void(WorkPackage const&)>;
 
@@ -72,12 +73,16 @@ public:
     void resume(MinerPauseEnum fromwhat);
     bool initEpoch_internal();
     bool initEpoch();
-    void search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w);
+    void search(uint8_t const* header, uint64_t target, uint64_t start_nonce, WorkPackage w);
     void workLoop();
-    void onWorkRecieved(WorkPackage const& wp);
+    void onWorkRecieved(WorkPackage& wp);
 
 
 private:
+    std::queue<WorkPackage> workq;
+    bool getNewWork = false;
+    bool canSearch;
+
     std::atomic<WorkerState> m_state = { WorkerState::Starting };
     std::map<std::string, DeviceDescriptor> m_DevicesCollection = {};
     DeviceDescriptor m_deviceDescriptor;
@@ -111,13 +116,15 @@ private:
 	string authorizeJson();
 	void proccessResponse(Json::Value& res);
     string sumbitSolution();
-    bool processExt(string& enonce);
+    bool processExt(string enonce);
     bool initDevice();
     int getNumDevices();
     void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
-    void setWork(const WorkPackage& wp);
+    void setWork(WorkPackage& wp);
     void submitProof(Solution const& s);
     Result eval(int epoch, int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept;
+    void sendSolution();
+    void getNewWP();
 
     std::atomic<unsigned> m_epochChanges = { 0 };
     std::atomic<bool> m_connected = { false };

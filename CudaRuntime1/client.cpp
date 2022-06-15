@@ -20,6 +20,7 @@
 #include <nvrtc.h>
 #include "ethash.hpp"
 #include "ethash.h"
+#include <thread>
 #include "progpow.hpp"
 
 boost::asio::io_service g_io_service;  // The IO service itself
@@ -144,7 +145,6 @@ void Client::startConversation()
 
 	// get server response
 	string serverRes = getResString(m);
-	std::cout << "Message from server: " << serverRes << std::endl;
 
 	json je;
 	je = json::parse(serverRes);
@@ -165,106 +165,14 @@ void Client::startConversation()
 
 	signal(SIGINT, inthand);
 
+	m_state = WorkerState::Started;
+	std::thread t(&Client::workLoop, this);
+	t.detach();
+
 	while (true)
 	{
-		/*
-		*	 get server response - set target
-		*/
-
-		recv(_clientSocket, m, 1024, 0);
-		m[1023] = 0;
-
-		// get server response
-		serverRes = getResString(m);
-		json js1 = js1.parse(serverRes);
-		if (js1["method"] == "mining.notify")
-		{
-			goto pr;
-		}
-		/*
-		*	 get server response - notify
-		*/
-		recv(_clientSocket, m, 1024, 0);
-		m[1023] = 0;
-
-		// get server response
-		serverRes = getResString(m);
-
-	pr:
-		m_newjobprocessed = false;
-		std::string line;
-		size_t offset = serverRes.find("\n");
-
-		if (offset > 0)
-		{
-			line = serverRes.substr(0, offset);
-			boost::trim(line);
-
-			if (!line.empty())
-			{
-
-				// Test validity of chunk and process
-				Json::Value jMsg;
-				Json::Reader jRdr;
-				if (jRdr.parse(line, jMsg))
-				{
-					try
-					{
-						// Run in sync so no 2 different async reads may overlap
-						proccessResponse(jMsg);
-					}
-					catch (const std::exception& _ex)
-					{
-						cout << "Stratum got invalid Json message : " << _ex.what();
-					}
-				}
-				else
-				{
-					string what = jRdr.getFormattedErrorMessages();
-					boost::replace_all(what, "\n", " ");
-					cout << "Stratum got invalid Json message : " << what;
-				}
-			}
-
-
-			serverRes.erase(0, offset + 1);
-			offset = serverRes.find("\n");
-		}
-
-		onWorkRecieved(m_current);
-
-		WorkerState ex = WorkerState::Starting;
-		bool ok = m_state.compare_exchange_weak(ex, WorkerState::Started, std::memory_order_relaxed);
-		(void)ok;
-
-		workLoop();
-
-		// send solution to server
-		string ss = sumbitSolution();
-		send(_clientSocket, ss.c_str(), ss.size(), 0);
-		recv(_clientSocket, m, 1024, 0);
-		m[1023] = 0;
-
-		// get server response
-		serverRes = getResString(m);
-		json js = js.parse(serverRes);
-		while (js["id"] != 40)
-		{
-			recv(_clientSocket, m, 1024, 0);
-			m[1023] = 0;
-
-			// get server response
-			serverRes = getResString(m);
-			js = js.parse(serverRes);
-		}
-		std::cout << "\n\nMessage from server: " << serverRes << std::endl;
-
-		// check result
-		json j = j.parse(serverRes);
-		if (j["result"] != "true")
-			cout << EthRed "\n\nFail !!!\n\n" EthReset;
-		else
-			cout << EthGreen "\n\nSuccess !!!\n\n" EthReset;
+		getNewWP();
+		canSearch = true;
 	}
 
 	// Reset miner and stop working
@@ -387,7 +295,7 @@ void Client::compileKernel(uint64_t period_seed, uint64_t dag_elms, CUfunction& 
 	// Destroy the program.
 	NVRTC_SAFE_CALL(nvrtcDestroyProgram(&prog));
 
-	cout << "\nPre-compiled period " << period_seed << " CUDA ProgPow kernel for arch "
+	cout << "Pre-compiled period " << period_seed << " CUDA ProgPow kernel for arch "
 		<< to_string(m_deviceDescriptor.cuComputeMajor) << '.' << to_string(m_deviceDescriptor.cuComputeMinor) << endl;
 }
 
@@ -554,7 +462,7 @@ bool Client::initEpoch()
 	return result;
 }
 
-void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce, const WorkPackage& w)
+void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce, WorkPackage w)
 {
 	if (header == nullptr)
 	{
@@ -682,13 +590,13 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 					s.midx = m_index;
 
 					submitProof(s);
+					getNewWork = true;
 
 					double d = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search_start).count();
 
 					cout << EthWhite << "\n\nJob: " << w.header.abridged() << " Sol: 0x"
-						<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset;
+						<< dev::toHex(nonce) << EthLime " found in " << dev::getFormattedElapsed(d) << EthReset << endl;
 
-					m_state = WorkerState::Stopping;
 					return;
 				}
 			}
@@ -730,8 +638,11 @@ void Client::workLoop()
 	{
 		while (m_state == WorkerState::Started)
 		{
+			if (workq.empty())
+				continue;
 
-			const WorkPackage w = m_current;
+			const WorkPackage w = workq.front();
+
 			if (!w)
 			{
 				boost::system_time const timeout =
@@ -748,6 +659,7 @@ void Client::workLoop()
 				old_epoch = w.epoch;
 				continue;
 			}
+
 
 			uint64_t period_seed = w.block / 3;
 			if (m_nextProgpowPeriod == 0)
@@ -769,7 +681,7 @@ void Client::workLoop()
 				}
 				old_period_seed = period_seed;
 				m_kernelExecIx ^= 1;
-				cout << "Launching period " << period_seed << " ProgPow kernel";
+				cout << "Launching period " << period_seed << " ProgPow kernel" << endl;
 				m_nextProgpowPeriod = period_seed + 1;
 				m_compileThread = new boost::thread(boost::bind(&Client::asyncCompile, this));
 			}
@@ -778,12 +690,15 @@ void Client::workLoop()
 			uint64_t upper64OfBoundary = (uint64_t)(dev::u64)((dev::u256)w.get_boundary() >> 192);
 
 			// Eventually start searching
-			/*auto headerHash = ethash::hash256_from_bytes(m_current.header.data());
-			auto b = ethash::hash256_from_bytes(m_current.boundary.data());
-			auto& context = ethash::get_global_epoch_context(m_current.epoch);
-			ethash::search_result sr = ethash::search_light(context, headerHash, b,m_current.startNonce, m_batch_size);*/
-			search(m_current.header.data(), upper64OfBoundary, m_current.startNonce, w);
-
+			search(w.header.data(), upper64OfBoundary, w.startNonce, w);
+			if (getNewWork)
+			{
+				canSearch = false;
+				std::thread t(&Client::sendSolution, this);
+				t.detach();
+				workq.pop();
+				getNewWork = false;
+			}
 		}
 	}
 	catch (cuda_runtime_error const& _e)
@@ -794,13 +709,13 @@ void Client::workLoop()
 	}
 }
 
-void Client::onWorkRecieved(WorkPackage const& wp)
+void Client::onWorkRecieved(WorkPackage& wp)
 {
 	// Should not happen !
 	if (!wp)
 		return;
 
-	int _currentEpoch = m_current.epoch;
+	int _currentEpoch = wp.epoch;
 	bool newEpoch = (_currentEpoch == -1);
 
 	// In EthereumStratum/2.0.0 epoch number is set in session
@@ -811,7 +726,7 @@ void Client::onWorkRecieved(WorkPackage const& wp)
 
 	bool newDiff = (wp.boundary != m_current.boundary);
 
-	m_current = wp;
+	//m_current = wp;
 
 	if (newEpoch)
 	{
@@ -820,29 +735,29 @@ void Client::onWorkRecieved(WorkPackage const& wp)
 		// If epoch is valued in workpackage take it
 		if (wp.epoch == -1)
 		{
-			if (m_current.block > 0)
-				m_current.epoch = m_current.block / EPOCH_LENGTH;
+			if (wp.block > 0)
+				wp.epoch = wp.block / EPOCH_LENGTH;
 			else
-				m_current.epoch = ethash::find_epoch_number(
-					ethash::hash256_from_bytes(m_current.seed.data()));
+				wp.epoch = ethash::find_epoch_number(
+					ethash::hash256_from_bytes(wp.seed.data()));
 		}
 	}
 	else
 	{
-		m_current.epoch = _currentEpoch;
+		wp.epoch = _currentEpoch;
 	}
 
 	if (newDiff || newEpoch)
 	{
 		double d = dev::getHashesToTarget(m_current.boundary.hex(dev::HexPrefix::Add));
-		cout << "Epoch : " EthWhite << m_current.epoch << EthReset << " Difficulty : " EthWhite
+		cout << "Epoch : " EthWhite << wp.epoch << EthReset << " Difficulty : " EthWhite
 		<< dev::getFormattedHashes(d) << EthReset << endl;
 	}
 
-	cout << "Job: " EthWhite << m_current.header.abridged()
-		<< (m_current.block != -1 ? (" block " + to_string(m_current.block)) : "") << EthReset << endl;
+	cout << "Job: " EthWhite << wp.header.abridged()
+		<< (wp.block != -1 ? (" block " + to_string(wp.block)) : "") << EthReset << endl;
 
-	setWork(m_current);
+	setWork(wp);
 }
 
 string Client::startJson()
@@ -967,6 +882,7 @@ string Client::sumbitSolution()
 	jReq["params"] = Json::Value(Json::arrayValue);
 	jReq["jsonrpc"] = "2.0";
 	jReq["params"].append(m_wallet + "." + m_rig);
+
 	//EMPTY
 	jReq["params"].append(_s.work.job);
 	//EMPTY
@@ -979,10 +895,11 @@ string Client::sumbitSolution()
 
 	string ret = boost::algorithm::replace_all_copy(jReq.toStyledString(), "\n", "");
 	ret = boost::algorithm::replace_all_copy(ret, " ", "") + '\n';
+	std::cout << "check: " << ret << std::endl;
 	return ret;
 }
 
-bool Client::processExt(string& enonce)
+bool Client::processExt(string enonce)
 {
 	static std::regex rgxHex("^(0x)?([A-Fa-f0-9]{2,})$");
 	std::smatch matches;
@@ -1145,7 +1062,7 @@ void Client::enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection)
 	}
 }
 
-void Client::setWork(const WorkPackage& wp)
+void Client::setWork(WorkPackage& wp)
 {
 	ethash::epoch_context _ec = ethash::get_global_epoch_context(wp.epoch);
 	m_epochContext.epochNumber = wp.epoch;
@@ -1175,7 +1092,9 @@ void Client::setWork(const WorkPackage& wp)
 		_startNonce = m_nonce_scrambler;
 	}
 
-	m_current = wp;
+	wp.startNonce = _startNonce + ((uint64_t)0 << m_nonce_segment_with);
+	workq.push(wp);
+	//m_current = wp;
 	m_new_work.store(true, std::memory_order_relaxed);
 }
 
@@ -1183,12 +1102,12 @@ void Client::submitProof(Solution const& s)
 {
 	const bool dbuild = false;
 	Result r = eval(s.work.epoch, s.work.block, s.work.header, s.nonce);
-	/*if (r.value > s.work.get_boundary())
+	if (r.value > s.work.get_boundary())
 	{
 		cout << "GPU " << s.midx
 			<< " gave incorrect result. Lower overclocking values if it happens frequently.";
 		return;
-	}*/
+	}
 	if (dbuild && (s.mixHash != r.mixHash))
 		cout << "GPU " << s.midx << " mix missmatch";
 	_s = Solution{ s.nonce, r.mixHash, s.work, s.tstamp, s.midx };
@@ -1198,13 +1117,120 @@ Result Client::eval(int epoch, int _block_number, dev::h256 const& _headerHash, 
 {
 	auto headerHash = ethash::hash256_from_bytes(_headerHash.data());
 	auto& context = ethash::get_global_epoch_context(epoch);
-	//progpow::result result = ethash::hash(context, headerHash, _nonce);
 	progpow::result result = progpow::hash(context, _block_number, headerHash, _nonce);
-	cout << "\n" << endl;
-	//progpow::hash_one(context, _block_number, &headerHash, _nonce, &ethash::hash256_from_bytes(result.mix_hash.bytes), &ethash::hash256_from_bytes(result.final_hash.bytes));
 	dev::h256 mix{ reinterpret_cast<byte*>(result.mix_hash.bytes), dev::h256::ConstructFromPointer };
 	dev::h256 final{ reinterpret_cast<byte*>(result.final_hash.bytes), dev::h256::ConstructFromPointer };
 	return { final, mix };
+}
+
+void Client::sendSolution()
+{
+	char m[1024];
+	string serverRes;
+	// send solution to server
+	string ss = sumbitSolution();
+	send(_clientSocket, ss.c_str(), ss.size(), 0);
+	recv(_clientSocket, m, 1024, 0);
+	m[1023] = 0;
+
+	// get server response
+	serverRes = getResString(m);
+	json js = js.parse(serverRes);
+	//cout << serverRes << endl;
+	int count = 0;
+	while (js["id"] != 40 || count < 3)
+	{
+		recv(_clientSocket, m, 1024, 0);
+		m[1023] = 0;
+
+		// get server response
+		serverRes = getResString(m);
+		js = js.parse(serverRes);
+		count++;
+	}
+	std::cout << "\n\nMessage from server: " << serverRes << std::endl;
+
+	// check result
+	json j = j.parse(serverRes);
+	if (j["result"] != "true")
+		cout << EthRed "\nFail !!!\n" EthReset;
+	else
+		cout << EthGreen "\nSuccess !!!\n" EthReset;
+
+	canSearch = true;
+}
+
+void Client::getNewWP()
+{
+	while (!canSearch);
+
+	char m[1024];
+	string serverRes;
+
+
+	recv(_clientSocket, m, 1024, 0);
+	m[1023] = 0;
+
+	// get server response
+	serverRes = getResString(m);
+	json js1 = js1.parse(serverRes);
+	if (js1["method"] == "mining.notify")
+	{
+		goto pr;
+	}
+	/*
+	*	 get server response - notify
+	*/
+	recv(_clientSocket, m, 1024, 0);
+	m[1023] = 0;
+
+	// get server response
+	serverRes = getResString(m);
+
+pr:
+	std::string line;
+	size_t offset = serverRes.find("\n");
+
+	if (offset > 0)
+	{
+		line = serverRes.substr(0, offset);
+		boost::trim(line);
+
+		if (!line.empty())
+		{
+
+			// Test validity of chunk and process
+			Json::Value jMsg;
+			Json::Reader jRdr;
+			if (jRdr.parse(line, jMsg))
+			{
+				try
+				{
+					// Run in sync so no 2 different async reads may overlap
+					proccessResponse(jMsg);
+				}
+				catch (const std::exception& _ex)
+				{
+					cout << "Stratum got invalid Json message : " << _ex.what();
+				}
+			}
+			else
+			{
+				string what = jRdr.getFormattedErrorMessages();
+				boost::replace_all(what, "\n", " ");
+				cout << "Stratum got invalid Json message : " << what;
+			}
+		}
+
+
+		serverRes.erase(0, offset + 1);
+		offset = serverRes.find("\n");
+	}
+	onWorkRecieved(m_current);
+
+	WorkerState ex = WorkerState::Starting;
+	bool ok = m_state.compare_exchange_weak(ex, WorkerState::Started, std::memory_order_relaxed);
+	(void)ok;
 }
 
 std::string padLeft(std::string _value, size_t _length, char _fillChar)
