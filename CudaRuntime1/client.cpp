@@ -87,7 +87,7 @@ Client::Client(string wallet, string rig) :
 	}
 
 	// Count of subscribed devices
-	int subscribedDevices = 0;
+	unsigned int subscribedDevices = 0;
 	for (auto it = m_DevicesCollection.begin(); it != m_DevicesCollection.end(); it++)
 	{
 		if (it->second.subscriptionType != DeviceSubscriptionTypeEnum::None)
@@ -114,7 +114,7 @@ Client::~Client()
 }
 
 
-void Client::connectToServer(char* serverIP, int port)
+void Client::connectToServer(char* serverIP, unsigned  int port)
 {
 	struct sockaddr_in sa = { 0 };
 
@@ -468,14 +468,14 @@ void Client::search(uint8_t const* header, uint64_t target, uint64_t start_nonce
 	{
 		return;
 	}
-	set_header(*reinterpret_cast<hash32_t const*>(&header));
+	set_header(*reinterpret_cast<hash32_t const*>(header));
 
 	if (m_current_target != target)
 	{
 		set_target(target);
 		m_current_target = target;
 	}
-	hash32_t current_header = *reinterpret_cast<hash32_t const*>(&header);
+	hash32_t current_header = *reinterpret_cast<hash32_t const*>(header);
 	hash64_t* dag;
 	get_constants(&dag, NULL, NULL, NULL);
 
@@ -1019,9 +1019,9 @@ int Client::getNumDevices()
 
 void Client::enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection)
 {
-	int numDevices = getNumDevices();
+	unsigned int numDevices = getNumDevices();
 
-	for (int i = 0; i < numDevices; i++)
+	for (unsigned int i = 0; i < numDevices; i++)
 	{
 		string uniqueId;
 		ostringstream s;
@@ -1101,6 +1101,8 @@ void Client::setWork(WorkPackage& wp)
 void Client::submitProof(Solution const& s)
 {
 	const bool dbuild = false;
+
+	// r.value is the problem - isn't correct
 	Result r = eval(s.work.epoch, s.work.block, s.work.header, s.nonce);
 	if (r.value > s.work.get_boundary())
 	{
@@ -1113,11 +1115,12 @@ void Client::submitProof(Solution const& s)
 	_s = Solution{ s.nonce, r.mixHash, s.work, s.tstamp, s.midx };
 }
 
-Result Client::eval(int epoch, int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept
+Result Client::eval(int epoch, unsigned int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept
 {
 	auto headerHash = ethash::hash256_from_bytes(_headerHash.data());
 	auto& context = ethash::get_global_epoch_context(epoch);
 	progpow::result result = progpow::hash(context, _block_number, headerHash, _nonce);
+	std::cout << result.final_hash.str << std::endl;
 	dev::h256 mix{ reinterpret_cast<byte*>(result.mix_hash.bytes), dev::h256::ConstructFromPointer };
 	dev::h256 final{ reinterpret_cast<byte*>(result.final_hash.bytes), dev::h256::ConstructFromPointer };
 	return { final, mix };
@@ -1137,7 +1140,7 @@ void Client::sendSolution()
 	serverRes = getResString(m);
 	json js = js.parse(serverRes);
 	//cout << serverRes << endl;
-	int count = 0;
+	unsigned int count = 0;
 	while (js["id"] != 40 || count < 3)
 	{
 		recv(_clientSocket, m, 1024, 0);
@@ -1152,7 +1155,7 @@ void Client::sendSolution()
 
 	// check result
 	json j = j.parse(serverRes);
-	if (j["result"] != "true")
+	if (j["result"] != true)
 		cout << EthRed "\nFail !!!\n" EthReset;
 	else
 		cout << EthGreen "\nSuccess !!!\n" EthReset;

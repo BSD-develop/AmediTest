@@ -11,6 +11,7 @@
 #include <boost/format.hpp>
 #include <boost/thread.hpp>
 #include <boost/asio.hpp>
+#include <boost/ptr_container/ptr_vector.hpp>
 #include <queue>
 
 using WorkReceived = function<void(WorkPackage const&)>;
@@ -60,7 +61,7 @@ public:
     Client() = default;
 	Client(string wallet, string rig);
 	~Client();
-	void connectToServer(char* serverIP, int port);
+	void connectToServer(char* serverIP, unsigned int port);
 	void startConversation();
     void onWorkReceived(WorkReceived const& _handler) { m_onWorkReceived = _handler; }
     //void sendJ(Json::Value const& jReq);
@@ -122,7 +123,7 @@ private:
     void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
     void setWork(WorkPackage& wp);
     void submitProof(Solution const& s);
-    Result eval(int epoch, int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept;
+    Result eval(int epoch, unsigned int _block_number, dev::h256 const& _headerHash, uint64_t _nonce) noexcept;
     void sendSolution();
     void getNewWP();
 
